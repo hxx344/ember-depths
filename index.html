@@ -24,6 +24,9 @@
   color-scheme: dark;
 }
 [hidden] { display: none !important; }
+/* 脚本没有运行时（例如微信的文件预览）才会显示：延迟出现，正常加载时脚本会先把它隐藏 */
+.norun { margin: 14px 0 0; font-size: 14px; line-height: 1.6; color: var(--ember-hot); opacity: 0; animation: norun 0.3s 2.5s forwards; }
+@keyframes norun { to { opacity: 1; } }
 html, body { height: 100%; margin: 0; overflow: hidden; }
 body {
   background: var(--void); color: var(--bone); font-family: var(--f-ui);
@@ -170,6 +173,7 @@ body {
       </dl>
       <div id="bestLine" class="best"></div>
       <button id="startBtn" class="btn" type="button">点燃火种</button>
+      <p id="noRun" class="norun">点击没有反应？当前页面不能运行游戏。请点右上角的「···」，选择「在浏览器打开」（或「用其他应用打开」，再选浏览器）。</p>
     </div>
   </div>
 </section>
@@ -2310,6 +2314,7 @@ function frame(now) {
 buildLevel();
 showBest();
 requestAnimationFrame(frame);
+$('noRun').hidden = true;
 
 // 供自动化测试读取状态（不影响游戏）
 window.__ember = { get state() { return state; }, get floor() { return floorNum; }, get enemies() { return enemies.length; }, get hp() { return P.hp; }, get level() { return P.level; }, get kills() { return run.kills; }, rooms: () => rooms.length, _dbg: () => ({ P, rooms, enemies, bossEnemy, portal, stats, hazards, ebullets, DF, setFloor(n) { floorNum = n; DF = calcDiff(n); }, spawn: (t, x, z, el) => createEnemy(t, x, z, el), solid: solidAt, reset() { for (const e of enemies) killEnemy(e, true); enemies = []; bossEnemy = null; for (const b of ebullets) dynGroup.remove(b.mesh); ebullets = []; while (hazards.length) removeHazard(hazards.length - 1); } }), _step(n) { for (let i = 0; i < n; i++) tick(1 / 60); }, get post() { return !!(Post && Post.on); }, _postOff() { if (Post) Post.disable(); }, _bench(n, usePost) { const gl = renderer.getContext(), px = new Uint8Array(4), t0 = performance.now(); for (let i = 0; i < n; i++) { if (usePost && Post && Post.on) Post.render(time); else renderer.render(scene, camera); } gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px); return (performance.now() - t0) / n; } };
