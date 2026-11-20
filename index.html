@@ -291,6 +291,8 @@ const Sfx = (() => {
     eshot() { if (gate('e', 90)) tone(260, 0.1, 'square', 0.035, 0.7); },
     portal() { [392, 523, 659, 784, 1046].forEach((f, i) => tone(f, 0.3, 'sine', 0.1, 1.02, i * 0.09)); },
     boss() { tone(70, 1.2, 'sawtooth', 0.22, 0.5); noise(1.0, 0.18, 200); },
+    lob() { if (gate('l', 120)) tone(150, 0.22, 'sine', 0.14, 2.4); },
+    charge() { if (gate('c', 200)) tone(700, 0.5, 'sine', 0.04, 2.2); },
   };
 })();
 
@@ -342,6 +344,15 @@ const ebMat = glow(0xff3d7f);
 const gemMat = glow(0xffcc55);
 const orbMat = glow(0xff8a2a);
 const flameMat = glow(0xff8c2e);
+const eliteMat = glow(0xffd27a);
+const homingMat = glow(0xc58bff);
+const sniperBMat = glow(0xe4ff70);
+const teleRingMat = new THREE.MeshBasicMaterial({ color: 0xff3d5a, transparent: true, opacity: 0.75, toneMapped: false, side: THREE.DoubleSide, depthWrite: false });
+const teleFillMat = new THREE.MeshBasicMaterial({ color: 0xff3d5a, transparent: true, opacity: 0.26, toneMapped: false, side: THREE.DoubleSide, depthWrite: false });
+const laserMat = new THREE.MeshBasicMaterial({ color: 0xff3d5a, transparent: true, opacity: 0.45, toneMapped: false, depthWrite: false });
+const laserHotMat = new THREE.MeshBasicMaterial({ color: 0xffd6e0, transparent: true, opacity: 0.92, toneMapped: false, depthWrite: false });
+const teleDiscGeo = new THREE.CircleGeometry(1, 36);
+const beamGeo = new THREE.BoxGeometry(1, 1, 1); beamGeo.translate(0.5, 0, 0);
 const eyeMat = new THREE.MeshBasicMaterial({ color: 0x0b0a10 });
 const heartMat = new THREE.MeshStandardMaterial({ color: 0xff3d63, emissive: 0xff2a55, emissiveIntensity: 0.7, roughness: 0.3 });
 const doorMat = new THREE.MeshStandardMaterial({ color: 0x3a1022, emissive: 0xff2d6f, emissiveIntensity: 0.55, roughness: 0.5 });
@@ -404,11 +415,31 @@ function updateParticles(dt) {
 // ============================================================
 let state = 'title';           // title | play | choose | pause | dead | transition
 let floorNum = 1, rooms = [], curRoom = null, activeRoom = null, bossEnemy = null, portal = null;
-let enemies = [], bolts = [], ebullets = [], gems = [], hearts = [], spawns = [], fx = [];
+let enemies = [], bolts = [], ebullets = [], gems = [], hearts = [], spawns = [], fx = [], hazards = [];
 let stats = null, owned = {};
 let choiceQueue = [], dying = 0, shake = 0, time = 0, autoAim = false, touchMode = false;
 let run = { kills: 0, bosses: 0, time: 0 };
 const camPos = new THREE.Vector3();
+
+// 难度曲线：前两层明显放缓，第三层为基准，之后逐层加压
+function calcDiff(f) {
+  return {
+    bspd: Math.min(11, 4.6 + 0.7 * (f - 1)),                                     // 敌弹速度
+    cd: f === 1 ? 1.45 : f === 2 ? 1.2 : Math.max(0.55, Math.pow(0.92, f - 3)),   // 攻击间隔倍率
+    hp: f === 1 ? 0.8 : 1 + 0.32 * (f - 2) + 0.03 * (f - 2) ** 2,                // 普通怪血量倍率
+    bossHp: f === 1 ? 0.8 : 1 + 0.5 * (f - 1) + 0.04 * (f - 1) ** 2,
+    spd: f === 1 ? 0.9 : 1 + 0.05 * (f - 2),                                     // 移动速度倍率
+    elite: f >= 4 ? Math.min(0.35, 0.07 * (f - 3)) : 0,                          // 精英概率
+  };
+}
+let DF = calcDiff(1);
+const FLOOR_NOTE = {
+  2: '爆虫出没 · 守卫学会霰弹',
+  3: '狙击眼、分裂体出没 · 法师连射 · 炮塔扫射',
+  4: '炮手出没 · 精英怪现身 · 守卫学会旋转光束',
+  5: '冲锋兽二段冲锋 · 史莱姆死后迸出弹片 · 追踪法球',
+  6: '炮手齐射 · 分裂体一分为三 · 弹幕加密',
+};
 
 function baseStats() {
   return { maxHp: 6, dmg: 10, fireRate: 3.2, boltSpeed: 15, range: 0.85, multishot: 1, pierce: 0, bounce: 0, crit: 0.05,
@@ -480,7 +511,7 @@ function disposeLevel() {
   for (const s of spawns) s.mesh.material.dispose();
   for (const f of fx) if (f.dispose) f.dispose();
   while (dynGroup.children.length) dynGroup.remove(dynGroup.children[0]);
-  enemies = []; bolts = []; ebullets = []; gems = []; hearts = []; spawns = []; fx = [];
+  enemies = []; bolts = []; ebullets = []; gems = []; hearts = []; spawns = []; fx = []; hazards = [];
   portal = null; bossEnemy = null; activeRoom = null; curRoom = null;
   for (const p of parts) p.life = 0;
 }
@@ -488,6 +519,7 @@ function disposeLevel() {
 function buildLevel() {
   disposeLevel();
   levelToken++;
+  DF = calcDiff(floorNum);
   let n = Math.min(7 + floorNum, 14), layout = null;
   while (!layout) { layout = genLayout(n); n = Math.max(5, n - 1); }
   rooms = layout;
@@ -712,19 +744,24 @@ const ED = {
   turret:   { hp: 58, r: 0.6,  speed: 0,   xp: 2, color: 0x5fa8ff },
   splitter: { hp: 62, r: 0.72, speed: 2.4, xp: 3, color: 0xd36bd6 },
   mini:     { hp: 13, r: 0.3,  speed: 5,   xp: 1, color: 0xe99be9 },
+  bomber:   { hp: 22, r: 0.42, speed: 5.2, xp: 1, color: 0xffd23f },
+  sniper:   { hp: 34, r: 0.45, speed: 2.4, xp: 2, color: 0xc8f05a },
+  mortar:   { hp: 50, r: 0.55, speed: 1.4, xp: 3, color: 0xc0875a },
   boss:     { hp: 950, r: 1.4, speed: 1.8, xp: 24, color: 0xff7a2e },
 };
 const BOSSES = [
-  { name: '余烬守卫', color: 0xff7a2e },
-  { name: '霜魇', color: 0x7fd6ff },
-  { name: '雷殛之眼', color: 0xc9a8ff },
-  { name: '腐沼之母', color: 0x6fdc7a },
+  { name: '余烬守卫', color: 0xff7a2e, sig: 'slam' },
+  { name: '霜魇', color: 0x7fd6ff, sig: 'shotgun' },
+  { name: '雷殛之眼', color: 0xc9a8ff, sig: 'beam' },
+  { name: '腐沼之母', color: 0x6fdc7a, sig: 'rain' },
 ];
+const BOSS_DUR = { spiral: 3.4, rings: 2.4, slam: 1.6, summon: 1.2, shotgun: 1.9, rain: 2.2, beam: 3.0 };
 const FROST_C = new THREE.Color(0x8fd8ff), WHITE_C = new THREE.Color(0xffffff);
 
 function rollEnemyType() {
   const f = floorNum;
-  const pool = [['slime', 10], ['caster', 6], ['charger', f >= 2 ? 6 : 2], ['turret', f >= 2 ? 4 : 1.5], ['splitter', f >= 3 ? 4 : 0]];
+  const pool = [['slime', 10], ['caster', 6], ['charger', f >= 2 ? 6 : 2], ['turret', f >= 2 ? 4 : 1], ['bomber', f >= 2 ? 5 : 0],
+    ['splitter', f >= 3 ? 4 : 0], ['sniper', f >= 3 ? 4 : 0], ['mortar', f >= 4 ? 4 : 0]];
   let r = Math.random() * pool.reduce((a, b) => a + b[1], 0);
   for (const [t, w] of pool) { r -= w; if (r <= 0) return t; }
   return 'slime';
@@ -732,7 +769,7 @@ function rollEnemyType() {
 
 function makeEnemyMesh(e) {
   const g = new THREE.Group();
-  const mat = new THREE.MeshStandardMaterial({ color: e.color, roughness: 0.45, metalness: 0.05, emissive: new THREE.Color(e.color), emissiveIntensity: e.type === 'boss' ? 0.35 : 0.18 });
+  const mat = new THREE.MeshStandardMaterial({ color: e.color, roughness: 0.45, metalness: 0.05, emissive: new THREE.Color(e.color), emissiveIntensity: e.emi });
   e.mat = mat;
   const add = (geo, m, x, y, z, sx, sy, sz) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); o.scale.set(sx, sy, sz); o.castShadow = true; g.add(o); return o; };
   const r = e.r;
@@ -762,6 +799,27 @@ function makeEnemyMesh(e) {
       e.ring = add(torusGeo, ebMat, 0, 0.85, 0, 0.62, 0.62, 0.62);
       e.ring.rotation.x = Math.PI / 2; e.ring.castShadow = false;
       break;
+    case 'bomber': {
+      e.body = add(icoGeo, mat, 0, 0.5, 0, 0.42, 0.42, 0.42);
+      const fuse = add(sphereGeo, flameMat, 0, 0.98, 0, 0.09, 0.09, 0.09); fuse.castShadow = false;
+      add(sphereGeo, eyeMat, 0.14, 0.6, 0.36, 0.06, 0.08, 0.06);
+      add(sphereGeo, eyeMat, -0.14, 0.6, 0.36, 0.06, 0.08, 0.06);
+      break;
+    }
+    case 'sniper':
+      add(cylGeo, stoneMat, 0, 0.12, 0, 0.36, 0.24, 0.36);
+      add(cylGeo, mat, 0, 0.65, 0, 0.09, 1.0, 0.09);
+      e.body = add(sphereGeo, mat, 0, 1.3, 0, 0.34, 0.34, 0.34);
+      add(sphereGeo, eyeMat, 0, 1.32, 0.24, 0.17, 0.17, 0.14);
+      add(sphereGeo, ebMat, 0, 1.32, 0.33, 0.07, 0.07, 0.05);
+      break;
+    case 'mortar': {
+      add(cylGeo, stoneMat, 0, 0.25, 0, 0.58, 0.5, 0.58);
+      e.body = add(sphereGeo, mat, 0, 0.66, 0, 0.48, 0.34, 0.48);
+      const barrel = add(cylGeo, mat, 0, 0.98, 0.16, 0.17, 0.75, 0.17); barrel.rotation.x = 0.6;
+      const mouth = add(cylGeo, eyeMat, 0, 1.3, 0.38, 0.12, 0.05, 0.12); mouth.rotation.x = 0.6;
+      break;
+    }
     case 'boss': {
       e.body = add(icoGeo, mat, 0, r + 0.3, 0, r, r, r);
       e.ringMat = glow(e.color);
@@ -774,31 +832,102 @@ function makeEnemyMesh(e) {
   return g;
 }
 
-function createEnemy(type, x, z) {
-  const d = ED[type], f = floorNum - 1;
-  const hpMul = type === 'boss' ? 1 + 0.5 * f : 1 + 0.32 * f;
+function createEnemy(type, x, z, elite = false) {
+  const d = ED[type];
+  const hpMul = type === 'boss' ? DF.bossHp : DF.hp * (elite ? 2.2 : 1);
   const e = { type, pos: new THREE.Vector3(x, 0, z), vel: new THREE.Vector3(), r: d.r, hp: d.hp * hpMul, maxHp: d.hp * hpMul,
-    speed: d.speed * (1 + 0.04 * f), xp: d.xp, color: d.color, t: rand(0.4, 1.4), state: 'walk', st: 0, slow: 0, flash: 0,
-    side: Math.random() < 0.5 ? 1 : -1, ang: rand(0, TAU), orbHit: 0, dead: false, face: 0 };
+    speed: d.speed * DF.spd, xp: d.xp * (elite ? 2 : 1), color: d.color, t: rand(0.6, 1.6) * DF.cd, state: 'walk', st: 0, slow: 0, flash: 0,
+    side: Math.random() < 0.5 ? 1 : -1, ang: rand(0, TAU), orbHit: 0, dead: false, face: 0, burst: 0, bt: 0,
+    elite, cdm: elite ? 0.8 : 1, emi: type === 'boss' ? 0.35 : elite ? 0.32 : 0.18 };
   if (type === 'boss') {
     const v = BOSSES[(floorNum - 1) % BOSSES.length];
-    e.color = v.color; e.name = v.name; e.pattern = 'idle'; e.st = 1.2; e.last = '';
+    e.color = v.color; e.name = v.name; e.sig = v.sig; e.pattern = 'idle'; e.st = 1.2; e.last = ''; e.ct = 0;
     bossEnemy = e;
   }
   e.mesh = makeEnemyMesh(e);
   e.mesh.position.copy(e.pos);
+  if (elite) {                     // 精英：体型更大，脚下有金色光环
+    e.mesh.scale.setScalar(1.22);
+    e.halo = new THREE.Mesh(torusGeo, eliteMat);
+    e.halo.rotation.x = Math.PI / 2; e.halo.position.y = 0.06; e.halo.scale.setScalar(e.r * 1.3);
+    e.mesh.add(e.halo);
+  }
   dynGroup.add(e.mesh);
   enemies.push(e);
   return e;
 }
 
-function fireEnemyBullet(x, z, a, speed, size = 0.2) {
-  const m = new THREE.Mesh(sphereGeo, ebMat);
+function fireEnemyBullet(x, z, a, speed, size = 0.2, mat = ebMat) {
+  const m = new THREE.Mesh(sphereGeo, mat);
   m.scale.setScalar(size); m.position.set(x, 0.75, z);
   dynGroup.add(m);
-  ebullets.push({ mesh: m, x, z, vx: Math.cos(a) * speed, vz: Math.sin(a) * speed, r: size, life: 7 });
+  const b = { mesh: m, x, z, vx: Math.cos(a) * speed, vz: Math.sin(a) * speed, r: size, life: 7, home: 0, homeT: 0 };
+  ebullets.push(b);
+  return b;
 }
 function ring(x, z, n, speed, off = 0, size = 0.2) { for (let i = 0; i < n; i++) fireEnemyBullet(x, z, off + (i / n) * TAU, speed, size); }
+function fan(x, z, a, n, spread, speed, size = 0.2) { for (let i = 0; i < n; i++) fireEnemyBullet(x, z, a + (n > 1 ? (i / (n - 1) - 0.5) * spread : 0), speed, size); }
+
+// 射线到墙的距离（激光、光束长度）
+function rayLen(x, z, a, max) {
+  const c = Math.cos(a), s = Math.sin(a);
+  let d = 0;
+  while (d < max) { d += 0.25; if (solidAt(Math.floor(x + c * d), Math.floor(z + s * d))) break; }
+  return Math.min(d, max);
+}
+// 预警线：狙击瞄准线、冲锋路线
+function setLaser(e, a, len, hot, w, y, h = w) {
+  if (!e.laser) { e.laser = new THREE.Mesh(beamGeo, laserMat); dynGroup.add(e.laser); }
+  const L = e.laser;
+  L.visible = true; L.material = hot ? laserHotMat : laserMat;
+  L.position.set(e.pos.x, y, e.pos.z); L.rotation.y = -a; L.scale.set(len, h, w);
+}
+function hideLaser(e) { if (e.laser) e.laser.visible = false; }
+function clearEnemyFx(e) {
+  if (e.laser) { dynGroup.remove(e.laser); e.laser = null; }
+  if (e.beams) { for (const b of e.beams) dynGroup.remove(b); e.beams = null; }
+}
+
+// 地面预警圈：倒计时结束后爆炸。shell=抛物线炮弹，drop=从天而降，owner=自爆者（先被击杀则取消）
+function addBlast(x, z, r, t, opt = {}) {
+  const fill = new THREE.Mesh(teleDiscGeo, teleFillMat);
+  fill.rotation.x = -Math.PI / 2; fill.position.set(x, 0.04, z); fill.scale.setScalar(0.01);
+  const edge = new THREE.Mesh(ringGeo, teleRingMat);
+  edge.rotation.x = -Math.PI / 2; edge.position.set(x, 0.05, z); edge.scale.setScalar(r);
+  dynGroup.add(fill, edge);
+  const h = { x, z, r, t, max: t, fill, edge, ...opt, shell: null };
+  if (opt.shell || opt.drop) { h.shell = new THREE.Mesh(sphereGeo, ebMat); h.shell.scale.setScalar(opt.drop ? 0.42 : 0.3); dynGroup.add(h.shell); }
+  hazards.push(h);
+  return h;
+}
+function removeHazard(i) {
+  const h = hazards[i];
+  dynGroup.remove(h.fill, h.edge); if (h.shell) dynGroup.remove(h.shell);
+  hazards.splice(i, 1);
+}
+function updateHazards(dt) {
+  teleRingMat.opacity = 0.55 + 0.3 * Math.sin(time * 16);
+  laserMat.opacity = 0.35 + 0.2 * Math.sin(time * 22);
+  for (let i = hazards.length - 1; i >= 0; i--) {
+    const h = hazards[i];
+    if (h.owner && h.owner.dead) { removeHazard(i); continue; }
+    h.t -= dt;
+    const k = 1 - Math.max(0, h.t) / h.max;
+    h.fill.scale.setScalar(Math.max(0.01, h.r * k));
+    if (h.shell) {
+      if (h.drop) h.shell.position.set(h.x, 0.4 + (1 - k) * 11, h.z);
+      else h.shell.position.set(h.sx + (h.x - h.sx) * k, 0.7 + Math.sin(k * Math.PI) * h.arc, h.sz + (h.z - h.sz) * k);
+    }
+    if (h.t > 0) continue;
+    const { x, z, r } = h;
+    removeHazard(i);
+    if (Math.hypot(P.pos.x - x, P.pos.z - z) < r + P.r * 0.5) hurtPlayer(1);
+    emit(x, 0.3, z, Math.round(10 + r * 8), h.color || 0xff6a3d, 3 + r * 2, 0.5, 0.16, 3);
+    shake = Math.max(shake, 0.12 + r * 0.04); Sfx.boom();
+    if (h.ringN) ring(x, z, h.ringN, h.ringSpd || DF.bspd * 0.65, rand(0, TAU));
+    if (h.owner) killEnemy(h.owner, true);
+  }
+}
 
 function updateEnemy(e, dt) {
   const dx = P.pos.x - e.pos.x, dz = P.pos.z - e.pos.z, dist = Math.hypot(dx, dz) || 0.001;
@@ -806,16 +935,24 @@ function updateEnemy(e, dt) {
   const sl = e.slow > 0 ? 0.6 : 1;
   e.slow -= dt; e.t -= dt * sl; e.st -= dt * sl;
   let tvx = 0, tvz = 0, follow = 6;
-  const bulletSpd = 6 + Math.min(floorNum, 8) * 0.35;
+  const f = floorNum, bspd = DF.bspd, cd = DF.cd * e.cdm;
   const hopper = e.type === 'slime' || e.type === 'mini' || e.type === 'splitter';
+  const cycle = modes => modes[(e.mk = (e.mk || 0) + 1) % modes.length];
+  const keepRange = (near, far) => {
+    if (dist > far) { tvx = ux; tvz = uz; }
+    else if (dist < near) { tvx = -ux; tvz = -uz; }
+    else { tvx = -uz * e.side; tvz = ux * e.side; if (Math.random() < dt * 0.4) e.side *= -1; }
+    tvx *= e.speed; tvz *= e.speed;
+  };
 
   switch (e.type) {
     case 'slime': case 'mini': case 'splitter': {
       follow = 2.6;
       if (e.t <= 0) {
-        e.t = e.type === 'splitter' ? rand(0.8, 1.1) : rand(0.45, 0.75);
+        e.t = (e.type === 'splitter' ? rand(0.8, 1.1) : rand(0.45, 0.75)) * (f === 1 ? 1.15 : 1);
         const k = e.speed * 1.9;
         e.vel.x = ux * k + rand(-0.8, 0.8); e.vel.z = uz * k + rand(-0.8, 0.8);
+        if (e.blk > 0) { e.blk = 0; if (Math.random() < 0.3) e.side *= -1; e.vel.x += -uz * e.side * k; e.vel.z += ux * e.side * k; }   // 被挡住：斜着跳开
       }
       const sp = Math.hypot(e.vel.x, e.vel.z);
       e.body.scale.y = e.r * 0.78 * (1 + Math.min(0.35, sp * 0.04));
@@ -824,76 +961,171 @@ function updateEnemy(e, dt) {
       break;
     }
     case 'caster': {
-      if (dist > 8.5) { tvx = ux; tvz = uz; }
-      else if (dist < 5) { tvx = -ux; tvz = -uz; }
-      else { tvx = -uz * e.side; tvz = ux * e.side; if (Math.random() < dt * 0.4) e.side *= -1; }
-      tvx *= e.speed; tvz *= e.speed;
+      keepRange(5, 8.5);
+      if (e.burst > 0) {                       // 连射
+        e.bt -= dt;
+        if (e.bt <= 0) { e.bt = 0.15; e.burst--; fireEnemyBullet(e.pos.x, e.pos.z, toP + rand(-0.05, 0.05), bspd * 1.1); Sfx.eshot(); }
+      }
       e.orb.scale.setScalar(e.t < 0.45 ? 0.14 + (0.45 - e.t) * 0.35 : 0.14);   // 蓄力提示
       e.orb.position.y = 1.8 + Math.sin(time * 4 + e.ang) * 0.08;
       if (e.t <= 0) {
-        e.t = rand(1.6, 2.3);
-        const n = floorNum >= 4 ? 3 : floorNum >= 2 ? 2 : 1;
-        for (let i = 0; i < n; i++) fireEnemyBullet(e.pos.x, e.pos.z, toP + (i - (n - 1) / 2) * 0.22, bulletSpd);
+        const m = cycle(f >= 5 ? ['fan', 'burst', 'orb'] : f >= 3 ? ['fan', 'burst'] : ['fan']);
+        if (m === 'fan') {
+          e.t = rand(1.6, 2.3) * cd;
+          fan(e.pos.x, e.pos.z, toP, f >= 6 ? 4 : f >= 4 ? 3 : f >= 2 ? 2 : 1, f >= 6 ? 0.66 : 0.44, bspd);
+        } else if (m === 'burst') {
+          e.t = rand(2.0, 2.6) * cd; e.burst = f >= 6 ? 4 : 3; e.bt = 0;
+        } else {                               // 追踪法球：慢、大，一段时间后停止追踪
+          e.t = rand(2.2, 2.8) * cd;
+          const b = fireEnemyBullet(e.pos.x, e.pos.z, toP, bspd * 0.55, 0.34, homingMat);
+          b.home = 1.5 + 0.1 * (f - 5); b.homeT = 2.4; b.life = 5;
+        }
         Sfx.eshot();
       }
       e.face = Math.atan2(ux, uz);
       break;
     }
     case 'charger': {
+      const wind = f === 1 ? 0.85 : f === 2 ? 0.72 : Math.max(0.45, 0.62 - 0.03 * (f - 3));
+      const cspd = Math.min(17, 12 + 0.6 * f);
       if (e.state === 'walk') {
         tvx = ux * e.speed; tvz = uz * e.speed; e.face = Math.atan2(ux, uz);
-        if (dist < 9 && e.t <= 0) { e.state = 'wind'; e.st = 0.6; }
+        if (dist < 9 && e.t <= 0) { e.state = 'wind'; e.st = wind; e.combo = f >= 5 ? 1 : 0; }
       } else if (e.state === 'wind') {
         e.cdx = ux; e.cdz = uz; e.face = Math.atan2(ux, uz);
         e.flash = Math.max(e.flash, 0.03);
-        if (e.st <= 0) { e.state = 'charge'; e.st = 0.55; }
+        setLaser(e, toP, cspd * 0.55, false, e.r * 1.8, 0.05, 0.02);      // 冲锋路线预警
+        if (e.st <= 0) { e.state = 'charge'; e.st = 0.55; hideLaser(e); }
       } else if (e.state === 'charge') {
-        follow = 30; tvx = e.cdx * 15; tvz = e.cdz * 15;
+        follow = 30; tvx = e.cdx * cspd; tvz = e.cdz * cspd;
         if (e.st <= 0 || e.bonk) {
-          e.state = 'stun'; e.st = e.bonk ? 0.9 : 0.4; e.t = rand(1.2, 2);
-          if (e.bonk) { shake = Math.max(shake, 0.15); emit(e.pos.x, 0.5, e.pos.z, 10, 0x8f879e, 3, 0.4); }
+          if (e.bonk) {
+            shake = Math.max(shake, 0.15); emit(e.pos.x, 0.5, e.pos.z, 10, 0x8f879e, 3, 0.4);
+            if (f >= 3) ring(e.pos.x, e.pos.z, f >= 6 ? 10 : 6, bspd * 0.7, rand(0, TAU));    // 撞墙震出弹环
+          }
+          if (e.combo > 0 && !e.bonk) { e.combo--; e.state = 'wind'; e.st = wind * 0.55; }  // 二段冲锋
+          else { e.state = 'stun'; e.st = e.bonk ? 0.9 : 0.4; e.t = rand(1.2, 2) * cd; }
           e.bonk = false;
         }
       } else if (e.state === 'stun' && e.st <= 0) e.state = 'walk';
       break;
     }
     case 'turret': {
-      e.ring.rotation.z += dt * 2;
+      e.ring.rotation.z += dt * (e.spin > 0 ? 8 : 2);
       e.face += dt * 0.6;
-      if (e.t <= 0) {
-        e.t = rand(2.1, 2.6);
-        ring(e.pos.x, e.pos.z, Math.min(6 + floorNum * 2, 18), bulletSpd * 0.8, e.ang);
-        e.ang += 0.26;
+      if (e.t < 0.3 && !(e.spin > 0)) e.flash = Math.max(e.flash, 0.03);
+      if (e.spin > 0) {                        // 旋转扫射
+        e.spin -= dt; e.bt -= dt;
+        if (e.bt <= 0) {
+          e.bt = f >= 7 ? 0.09 : 0.12;
+          for (let i = 0; i < 2; i++) fireEnemyBullet(e.pos.x, e.pos.z, e.ang + i * Math.PI, bspd * 0.75);
+          e.ang += 0.3; Sfx.eshot();
+        }
+      } else if (e.t <= 0) {
+        const m = cycle(f >= 5 ? ['ring', 'spin', 'aim'] : f >= 3 ? ['ring', 'spin'] : ['ring']);
+        if (m === 'ring') {
+          e.t = rand(2.1, 2.6) * cd;
+          ring(e.pos.x, e.pos.z, f === 1 ? 6 : Math.min(6 + f * 2, 20), bspd * 0.8, e.ang);
+          e.ang += 0.26;
+        } else if (m === 'spin') { e.t = rand(2.6, 3.0) * cd; e.spin = 1.3; e.bt = 0; }
+        else { e.t = rand(1.8, 2.2) * cd; fan(e.pos.x, e.pos.z, toP, 5, 0.7, bspd); }
         Sfx.eshot();
+      }
+      break;
+    }
+    case 'bomber': {
+      if (e.state === 'fuse') {                // 引信：原地膨胀闪烁，地面出现爆炸范围
+        follow = 20;
+        const k = 1 - Math.max(0, e.st) / e.fuse;
+        e.body.scale.setScalar(0.42 * (1 + k * 0.45));
+        if (Math.floor(time * (8 + 22 * k)) % 2 === 0) e.flash = Math.max(e.flash, 0.02);
+      } else {
+        tvx = ux * e.speed; tvz = uz * e.speed; e.face = Math.atan2(ux, uz);
+        e.body.position.y = 0.5 + Math.abs(Math.sin(time * 14 + e.ang)) * 0.14;
+        if (dist < 2.0) {
+          e.state = 'fuse';
+          e.fuse = e.st = f <= 2 ? 1.0 : Math.max(0.6, 0.9 - 0.04 * (f - 3));
+          addBlast(e.pos.x, e.pos.z, 2.1, e.fuse, { owner: e, color: 0xffd23f, ringN: f >= 5 ? 8 : 0 });
+          Sfx.charge();
+        }
+      }
+      break;
+    }
+    case 'sniper': {
+      follow = 4;
+      if (e.state === 'aim') {                 // 瞄准：前段跟踪玩家，最后一小段锁定（激光变亮）
+        const lockT = Math.min(0.32, e.aimT * 0.35);
+        if (e.st > lockT) e.aimA = toP;
+        const hot = e.st <= lockT;
+        setLaser(e, e.aimA, rayLen(e.pos.x, e.pos.z, e.aimA, 26), hot, hot ? 0.13 : 0.06, 1.32);
+        e.face = Math.atan2(Math.cos(e.aimA), Math.sin(e.aimA));
+        if (e.st <= 0) {
+          hideLaser(e);
+          const n = f >= 7 ? 3 : 1;
+          for (let i = 0; i < n; i++) fireEnemyBullet(e.pos.x, e.pos.z, e.aimA + (i - (n - 1) / 2) * 0.13, Math.min(22, bspd * 2.2), 0.16, sniperBMat);
+          e.state = 'walk'; e.t = rand(2.4, 3.2) * cd;
+          Sfx.zap(); Sfx.eshot();
+        }
+      } else {
+        keepRange(9, 12);
+        e.face = Math.atan2(ux, uz);
+        if (e.t <= 0 && dist < 16) {
+          e.state = 'aim';
+          e.aimT = e.st = f <= 3 ? 1.2 : Math.max(0.7, 1.2 - 0.07 * (f - 3));
+          e.aimA = toP; Sfx.charge();
+        }
+      }
+      break;
+    }
+    case 'mortar': {
+      keepRange(6, 11);
+      e.face = Math.atan2(ux, uz);
+      if (e.t < 0.4) e.flash = Math.max(e.flash, 0.03);
+      if (e.t <= 0 && dist < 18) {             // 抛射炮弹，落点有预警圈
+        e.t = rand(2.8, 3.4) * cd;
+        const n = f >= 8 ? 3 : f >= 6 ? 2 : 1;
+        for (let i = 0; i < n; i++) {
+          let tx = P.pos.x + P.vel.x * 0.5 + (i ? rand(-2.6, 2.6) : 0), tz = P.pos.z + P.vel.z * 0.5 + (i ? rand(-2.6, 2.6) : 0);
+          if (solidAt(Math.floor(tx), Math.floor(tz))) { tx = P.pos.x; tz = P.pos.z; }
+          addBlast(tx, tz, 1.5, 1.15 + i * 0.22, { shell: true, sx: e.pos.x, sz: e.pos.z, arc: 3.5, color: 0xffa040, ringN: f >= 7 ? 6 : 0 });
+        }
+        Sfx.lob();
       }
       break;
     }
     case 'boss': updateBoss(e, dt, ux, uz, toP, dist); tvx = e.tvx; tvz = e.tvz; follow = e.follow; break;
   }
 
+  if (e.blk > 0 && e.state === 'walk' && !hopper && e.speed > 0) {    // 被石柱挡住时侧移绕开
+    e.blk -= dt; tvx += -uz * e.side * e.speed * 1.3; tvz += ux * e.side * e.speed * 1.3;
+  }
   if (hopper) { const k = Math.exp(-dt * follow); e.vel.x *= k; e.vel.z *= k; }
   else { const k = 1 - Math.exp(-dt * follow); e.vel.x += (tvx - e.vel.x) * k; e.vel.z += (tvz - e.vel.z) * k; }
   const ex = e.vel.x * dt * sl, ez = e.vel.z * dt * sl;
   const ox = e.pos.x, oz = e.pos.z;
   moveBody(e.pos, ex, ez, e.r);
-  if (e.state === 'charge' && Math.hypot(e.pos.x - ox, e.pos.z - oz) < Math.hypot(ex, ez) * 0.5) e.bonk = true;
+  const want = Math.hypot(ex, ez), moved = Math.hypot(e.pos.x - ox, e.pos.z - oz);
+  if (e.state === 'charge' && moved < want * 0.5) e.bonk = true;
+  if (e.state === 'walk' && want > 0.01 && moved < want * 0.35 && !(e.blk > 0)) e.blk = 0.7;
 
   // 外观
   const jit = e.state === 'wind' ? rand(-0.06, 0.06) : 0;
   e.mesh.position.x = e.pos.x + jit; e.mesh.position.z = e.pos.z;
   e.mesh.rotation.y = e.face;
+  if (e.halo) e.halo.rotation.z += dt * 2;
   e.flash -= dt;
   if (e.flash > 0) { e.mat.emissive.copy(WHITE_C); e.mat.emissiveIntensity = 0.9; }
   else if (e.slow > 0) { e.mat.emissive.copy(FROST_C); e.mat.emissiveIntensity = 0.45; }
-  else { e.mat.emissive.set(e.color); e.mat.emissiveIntensity = e.type === 'boss' ? 0.35 : 0.18; }
+  else { e.mat.emissive.set(e.color); e.mat.emissiveIntensity = e.emi; }
 
   if (dist < e.r + P.r * 0.85) hurtPlayer(1);    // 接触伤害
 }
 
 function updateBoss(e, dt, ux, uz, toP, dist) {
+  const f = floorNum;
   const enraged = e.hp < e.maxHp * 0.5;
-  const rate = enraged ? 0.72 : 1;
-  const bs = 5.2 + Math.min(floorNum, 8) * 0.35;
+  const rate = (enraged ? 0.72 : 1) * clamp(DF.cd, 0.7, 1.35);
+  const bs = DF.bspd * 0.95;
   e.tvx = ux * e.speed * 0.8; e.tvz = uz * e.speed * 0.8; e.follow = 3;
   e.face = Math.atan2(ux, uz);
   e.rings[0].rotation.x += dt * 1.6; e.rings[0].rotation.y += dt * 0.7;
@@ -903,10 +1135,16 @@ function updateBoss(e, dt, ux, uz, toP, dist) {
 
   if (e.pattern === 'idle') {
     if (e.st <= 0) {
-      const opts = ['spiral', 'rings', 'slam', 'summon'].filter(p => p !== e.last && (p !== 'summon' || enemies.length < 7));
+      const pool = ['spiral', 'rings', 'slam', 'summon'];
+      if (f >= 2) pool.push('shotgun');
+      if (f >= 3) pool.push('rain');
+      if (f >= 4) pool.push('beam');
+      if (!pool.includes(e.sig)) pool.push(e.sig);
+      pool.push(e.sig);                        // 招牌招式出现得更频繁
+      const opts = pool.filter(p => p !== e.last && (p !== 'summon' || enemies.length < 7));
       e.pattern = e.last = pick(opts);
       e.k = 0; e.ct = 0;
-      e.st = { spiral: 3.4, rings: 2.4, slam: 1.6, summon: 1.2 }[e.pattern];
+      e.st = BOSS_DUR[e.pattern];
     }
     return;
   }
@@ -916,8 +1154,9 @@ function updateBoss(e, dt, ux, uz, toP, dist) {
       e.tvx *= 0.3; e.tvz *= 0.3;
       if (e.ct <= 0) {
         e.ct = 0.1 * rate;
-        const arms = enraged ? 4 : 3;
+        const arms = (f === 1 ? 2 : f >= 6 ? 4 : 3) + (enraged ? 1 : 0);
         for (let i = 0; i < arms; i++) fireEnemyBullet(e.pos.x, e.pos.z, e.ang + (i / arms) * TAU, bs * 0.85, 0.22);
+        if (f >= 7 && enraged && e.k++ % 3 === 0) fireEnemyBullet(e.pos.x, e.pos.z, -e.ang * 1.3, bs * 0.7, 0.22);   // 反向支流
         e.ang += 0.27; Sfx.eshot();
       }
       break;
@@ -925,38 +1164,96 @@ function updateBoss(e, dt, ux, uz, toP, dist) {
       e.tvx = 0; e.tvz = 0;
       if (e.ct <= 0) {
         e.ct = 0.7 * rate;
-        ring(e.pos.x, e.pos.z, 16 + Math.min(floorNum, 6) * 2, bs, (e.k++ % 2) * 0.2, 0.24);
+        ring(e.pos.x, e.pos.z, 12 + Math.min(f, 8) * 2, bs, (e.k++ % 2) * 0.2, 0.24);
         shake = Math.max(shake, 0.12); Sfx.boom();
       }
       break;
     case 'slam':
-      if (e.k === 0) { e.tvx = 0; e.tvz = 0; e.flash = Math.max(e.flash, 0.03); e.cdx = ux; e.cdz = uz; if (e.st < 1.0) e.k = 1; }
-      else if (e.k === 1) {
+      if (e.k === 0) {
+        e.tvx = 0; e.tvz = 0; e.flash = Math.max(e.flash, 0.03); e.cdx = ux; e.cdz = uz;
+        setLaser(e, toP, 9.5, false, e.r * 1.7, 0.05, 0.02);
+        if (e.st < 1.0) { e.k = 1; hideLaser(e); }
+      } else if (e.k === 1) {
         e.tvx = e.cdx * 14; e.tvz = e.cdz * 14; e.follow = 20;
-        if (e.st < 0.35) { e.k = 2; ring(e.pos.x, e.pos.z, 12, bs * 0.9, toP); shake = 0.35; Sfx.boom(); emit(e.pos.x, 0.3, e.pos.z, 30, e.color, 7, 0.6, 0.18); }
+        if (e.st < 0.35) {
+          e.k = 2; ring(e.pos.x, e.pos.z, 10 + Math.min(f, 6) * 2, bs * 0.9, toP);
+          if (f >= 5) ring(e.pos.x, e.pos.z, 8, bs * 0.55, toP + 0.4, 0.26);              // 高层：内外两圈
+          shake = 0.35; Sfx.boom(); emit(e.pos.x, 0.3, e.pos.z, 30, e.color, 7, 0.6, 0.18);
+        }
       } else { e.tvx = 0; e.tvz = 0; }
       break;
     case 'summon':
       e.tvx = 0; e.tvz = 0;
       if (e.k === 0) {
         e.k = 1;
-        const n = 2 + Math.min(3, Math.floor(floorNum / 2));
+        const n = 2 + Math.min(3, Math.floor(f / 2));
+        const types = f >= 4 ? ['slime', 'bomber', 'mini'] : ['slime', 'mini'];
         for (let i = 0; i < n; i++) {
           const a = (i / n) * TAU, x = e.pos.x + Math.cos(a) * 2.6, z = e.pos.z + Math.sin(a) * 2.6;
-          if (!solidAt(Math.floor(x), Math.floor(z))) queueSpawn(i % 2 ? 'mini' : 'slime', x, z, 0.7);
+          if (!solidAt(Math.floor(x), Math.floor(z))) queueSpawn(types[i % types.length], x, z, 0.7);
         }
       }
       break;
+    case 'shotgun':                            // 霰弹：短暂蓄力后连续几轮扇形齐射，弹速不一
+      e.tvx *= 0.2; e.tvz *= 0.2;
+      if (e.k === 0) { e.k = 1; e.ct = 0.45; }
+      if (e.ct < 0.18) e.flash = Math.max(e.flash, 0.03);
+      if (e.ct <= 0) {
+        e.ct = 0.5 * rate;
+        const n = 5 + Math.min(f, 6);
+        for (let i = 0; i < n; i++) fireEnemyBullet(e.pos.x, e.pos.z, toP + (i / (n - 1) - 0.5) * 1.0 + rand(-0.04, 0.04), bs * rand(0.8, 1.25), 0.22);
+        shake = Math.max(shake, 0.1); Sfx.boom();
+      }
+      break;
+    case 'rain':                               // 陨石雨：落点预警圈，第一颗瞄准玩家
+      e.tvx = 0; e.tvz = 0;
+      if (e.ct <= 0) {
+        e.ct = (f >= 6 ? 0.22 : 0.3) * rate;
+        const first = e.k++ === 0;
+        const x = P.pos.x + P.vel.x * 0.4 + (first ? 0 : rand(-3.2, 3.2)), z = P.pos.z + P.vel.z * 0.4 + (first ? 0 : rand(-3.2, 3.2));
+        if (!solidAt(Math.floor(x), Math.floor(z))) addBlast(x, z, 1.4, f >= 6 ? 0.85 : 1.0, { drop: true, color: e.color });
+        if (first) Sfx.charge();
+      }
+      break;
+    case 'beam': {                             // 旋转光束：先细线预警，再变粗开始转
+      e.tvx = 0; e.tvz = 0;
+      if (e.k === 0) {
+        e.k = 1;
+        const n = (f >= 6 ? 3 : 2) + (enraged ? 1 : 0);
+        e.beams = [];
+        for (let i = 0; i < n; i++) { const m = new THREE.Mesh(beamGeo, laserMat); dynGroup.add(m); e.beams.push(m); }
+        e.ba = toP + Math.PI / n; e.bdir = Math.random() < 0.5 ? 1 : -1;
+        Sfx.charge();
+      }
+      const tele = e.st > BOSS_DUR.beam - 0.9;
+      const w = 0.7;
+      e.ba += e.bdir * dt * (tele ? 0.25 : Math.min(1.5, (0.7 + 0.06 * f) * (enraged ? 1.2 : 1)));
+      const n = e.beams.length;
+      for (let i = 0; i < n; i++) {
+        const a = e.ba + (i / n) * TAU, m = e.beams[i];
+        const len = rayLen(e.pos.x, e.pos.z, a, 30);
+        m.material = tele ? laserMat : laserHotMat;
+        m.position.set(e.pos.x, 0.8, e.pos.z); m.rotation.y = -a;
+        m.scale.set(len, tele ? 0.06 : 0.45, tele ? 0.1 : w);
+        if (!tele) {
+          const rx = P.pos.x - e.pos.x, rz = P.pos.z - e.pos.z, c = Math.cos(a), s = Math.sin(a);
+          const along = rx * c + rz * s, perp = Math.abs(-rx * s + rz * c);
+          if (along > 0 && along < len && perp < w / 2 + P.r * 0.6) hurtPlayer(1);
+        }
+      }
+      if (!tele) Sfx.zap();
+      break;
+    }
   }
-  if (e.st <= 0) { e.pattern = 'idle'; e.st = rand(0.7, 1.1) * rate; }
+  if (e.st <= 0) { clearEnemyFx(e); e.pattern = 'idle'; e.st = rand(0.7, 1.1) * rate; }
 }
 
-function queueSpawn(type, x, z, t = 0.8) {
-  const m = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ color: 0xff4f8b, transparent: true, opacity: 0.6, toneMapped: false, side: THREE.DoubleSide }));
+function queueSpawn(type, x, z, t = 0.8, elite = false) {
+  const m = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ color: elite ? 0xffd27a : 0xff4f8b, transparent: true, opacity: 0.6, toneMapped: false, side: THREE.DoubleSide }));
   m.rotation.x = -Math.PI / 2; m.position.set(x, 0.03, z);
-  const s = type === 'boss' ? 2.2 : 0.75; m.scale.setScalar(s);
+  const s = type === 'boss' ? 2.2 : elite ? 1 : 0.75; m.scale.setScalar(s);
   dynGroup.add(m);
-  spawns.push({ type, x, z, t, mesh: m, s });
+  spawns.push({ type, x, z, t, mesh: m, s, elite });
 }
 
 function randomSpawnPos(r) {
@@ -973,8 +1270,8 @@ function randomSpawnPos(r) {
 }
 
 function spawnWave(r) {
-  const n = Math.min(3 + floorNum + randi(0, 2), 11);
-  for (let i = 0; i < n; i++) { const [x, z] = randomSpawnPos(r); queueSpawn(rollEnemyType(), x, z, 0.75 + i * 0.07); }
+  const n = floorNum === 1 ? randi(3, 4) : Math.min(3 + floorNum + randi(0, 2), 13);
+  for (let i = 0; i < n; i++) { const [x, z] = randomSpawnPos(r); queueSpawn(rollEnemyType(), x, z, 0.75 + i * 0.07, Math.random() < DF.elite); }
   r.waves--;
 }
 
@@ -988,7 +1285,7 @@ function activateRoom(r) {
     toast(BOSSES[(floorNum - 1) % BOSSES.length].name, `第${cnNum(floorNum)}层守卫`);
     Sfx.boss();
   } else {
-    r.waves = floorNum >= 2 && Math.random() < 0.45 ? 2 : 1;
+    r.waves = floorNum >= 5 && Math.random() < 0.3 ? 3 : floorNum >= 2 && Math.random() < 0.45 ? 2 : 1;
     spawnWave(r);
   }
 }
@@ -1004,19 +1301,23 @@ function clearRoom(r) {
   if (P.hp < stats.maxHp && Math.random() < 0.35) dropHeart(r.cx + 0.5, r.cz + 0.5);
 }
 
-function killEnemy(e) {
+function killEnemy(e, silent = false) {
   if (e.dead) return;
   e.dead = true;
   dynGroup.remove(e.mesh);
   e.mat.dispose(); if (e.ringMat) e.ringMat.dispose();
+  clearEnemyFx(e);
   const big = e.type === 'boss';
   emit(e.pos.x, 0.6, e.pos.z, big ? 80 : 16, e.color, big ? 10 : 5, 0.7, big ? 0.25 : 0.14);
   Sfx.kill();
+  if (silent) return;                    // 自爆：没有掉落
   run.kills++;
   for (let i = 0; i < e.xp; i++) dropGem(e.pos.x, e.pos.z);
   if (!big && Math.random() < 0.05) dropHeart(e.pos.x, e.pos.z);
   if (stats.leech && Math.random() < stats.leech && P.hp < stats.maxHp) { P.hp++; Sfx.heal(); emit(P.pos.x, 1, P.pos.z, 8, 0xff3d63, 2, 0.6); }
-  if (e.type === 'splitter') for (let i = 0; i < 2; i++) createEnemy('mini', e.pos.x + rand(-0.5, 0.5), e.pos.z + rand(-0.5, 0.5)).vel.set(rand(-6, 6), 0, rand(-6, 6));
+  if (e.elite) ring(e.pos.x, e.pos.z, 8, DF.bspd * 0.6, rand(0, TAU));                       // 精英死亡弹环
+  if (e.type === 'slime' && floorNum >= 5) ring(e.pos.x, e.pos.z, 4, DF.bspd * 0.55, rand(0, TAU), 0.17);   // 史莱姆弹片
+  if (e.type === 'splitter') for (let i = 0; i < (floorNum >= 6 ? 3 : 2); i++) createEnemy('mini', e.pos.x + rand(-0.5, 0.5), e.pos.z + rand(-0.5, 0.5)).vel.set(rand(-6, 6), 0, rand(-6, 6));
   if (big) bossDefeated(e);
 }
 
@@ -1028,6 +1329,7 @@ function bossDefeated(e) {
   spawns = [];
   for (const b of ebullets) dynGroup.remove(b.mesh);
   ebullets = [];
+  while (hazards.length) removeHazard(hazards.length - 1);
   shake = 0.8;
   const r = activeRoom || curRoom;
   const px = r ? r.cx + 0.5 : e.pos.x, pz = r ? r.cz + 0.5 : e.pos.z;
@@ -1144,7 +1446,7 @@ function lightning(x1, z1, x2, z2) {
 
 function hurtPlayer(n) {
   if (P.inv > 0 || P.dashT > 0 || dying > 0 || state !== 'play') return;
-  P.hp -= n; P.inv = 1.0;
+  P.hp -= n; P.inv = floorNum <= 2 ? 1.3 : 1.0;
   shake = Math.max(shake, 0.45);
   Sfx.hurt();
   emit(P.pos.x, 0.9, P.pos.z, 16, 0xff3d63, 4, 0.5, 0.12);
@@ -1256,12 +1558,20 @@ $('dashBtn').addEventListener('pointerdown', e => { e.preventDefault(); if (stat
 // ============================================================
 //  每帧更新
 // ============================================================
+function clearLine(x1, z1, x2, z2) {
+  const n = Math.ceil(Math.hypot(x2 - x1, z2 - z1) * 2);
+  for (let k = 1; k < n; k++) if (solidAt(Math.floor(x1 + (x2 - x1) * k / n), Math.floor(z1 + (z2 - z1) * k / n))) return false;
+  return true;
+}
+// 最近的敌人；视线被石柱挡住的敌人按 3 倍距离计，优先打得到的目标
 function nearestEnemy(maxD = 16) {
   let best = null, bd = maxD * maxD;
   for (const e of enemies) {
     if (e.dead) continue;
-    const d2 = (e.pos.x - P.pos.x) ** 2 + (e.pos.z - P.pos.z) ** 2;
-    if (d2 < bd) { bd = d2; best = e; }
+    let d2 = (e.pos.x - P.pos.x) ** 2 + (e.pos.z - P.pos.z) ** 2;
+    if (d2 >= bd) continue;
+    if (!clearLine(P.pos.x, P.pos.z, e.pos.x, e.pos.z)) { d2 *= 9; if (d2 >= bd && best) continue; }
+    if (d2 < bd || !best) { bd = d2; best = e; }
   }
   return best;
 }
@@ -1410,6 +1720,14 @@ function updateEnemyBullets(dt) {
   const hr = P.r * 0.7;     // 判定比模型略小，更公平
   for (let i = ebullets.length - 1; i >= 0; i--) {
     const b = ebullets[i];
+    if (b.home > 0 && b.homeT > 0) {
+      b.homeT -= dt;
+      const cur = Math.atan2(b.vz, b.vx), sp = Math.hypot(b.vx, b.vz);
+      let d = Math.atan2(P.pos.z - b.z, P.pos.x - b.x) - cur;
+      d = Math.atan2(Math.sin(d), Math.cos(d));
+      const na = cur + clamp(d, -b.home * dt, b.home * dt);
+      b.vx = Math.cos(na) * sp; b.vz = Math.sin(na) * sp;
+    }
     b.x += b.vx * dt; b.z += b.vz * dt; b.life -= dt;
     let dead = b.life <= 0 || solidAt(Math.floor(b.x), Math.floor(b.z));
     if (!dead && dying <= 0 && P.dashT <= 0 && P.inv <= 0 && (b.x - P.pos.x) ** 2 + (b.z - P.pos.z) ** 2 < (hr + b.r) ** 2) { hurtPlayer(1); dead = true; }
@@ -1428,7 +1746,7 @@ function updateSpawns(dt) {
     if (s.t <= 0) {
       dynGroup.remove(s.mesh); s.mesh.material.dispose();
       spawns.splice(i, 1);
-      createEnemy(s.type, s.x, s.z);
+      createEnemy(s.type, s.x, s.z, s.elite);
       emit(s.x, 0.4, s.z, s.type === 'boss' ? 40 : 10, 0xff4f8b, s.type === 'boss' ? 7 : 3, 0.5, 0.12);
       if (s.type === 'boss') shake = 0.6;
     }
@@ -1539,7 +1857,7 @@ function nextFloor() {
     playerMesh.position.set(P.pos.x, 0, P.pos.z);
     $('fade').classList.remove('on');
     state = 'play';
-    toast(`第${cnNum(floorNum)}层`, '越往深处，余烬越烫');
+    toast(`第${cnNum(floorNum)}层`, FLOOR_NOTE[floorNum] || (floorNum >= 7 ? '敌人更快，弹幕更密' : '越往深处，余烬越烫'));
     updateHUD(true);
   }, 600);
 }
@@ -1729,6 +2047,7 @@ function tick(dt) {
       enemies = enemies.filter(e => !e.dead);
       separateEnemies();
       updateEnemyBullets(dt);
+      updateHazards(dt);
       updateSpawns(dt);
       updatePickups(dt);
       if (state === 'play') updateRooms(dt);
@@ -1778,7 +2097,7 @@ showBest();
 requestAnimationFrame(frame);
 
 // 供自动化测试读取状态（不影响游戏）
-window.__ember = { get state() { return state; }, get floor() { return floorNum; }, get enemies() { return enemies.length; }, get hp() { return P.hp; }, get level() { return P.level; }, get kills() { return run.kills; }, rooms: () => rooms.length, _dbg: () => ({ P, rooms, enemies, bossEnemy, portal, stats }), _step(n) { for (let i = 0; i < n; i++) tick(1 / 60); } };
+window.__ember = { get state() { return state; }, get floor() { return floorNum; }, get enemies() { return enemies.length; }, get hp() { return P.hp; }, get level() { return P.level; }, get kills() { return run.kills; }, rooms: () => rooms.length, _dbg: () => ({ P, rooms, enemies, bossEnemy, portal, stats, hazards, ebullets, DF, setFloor(n) { floorNum = n; DF = calcDiff(n); }, spawn: (t, x, z, el) => createEnemy(t, x, z, el), solid: solidAt, reset() { for (const e of enemies) killEnemy(e, true); enemies = []; bossEnemy = null; for (const b of ebullets) dynGroup.remove(b.mesh); ebullets = []; while (hazards.length) removeHazard(hazards.length - 1); } }), _step(n) { for (let i = 0; i < n; i++) tick(1 / 60); } };
 })();
 </script>
 </body>
