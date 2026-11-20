@@ -1,10 +1,10 @@
 # 余烬地牢 · Ember Depths
 
-纯代码编写的 3D 肉鸽（roguelike）射击游戏：单个 `index.html`，没有任何图片、模型或音频素材。几何体、材质、粒子和音效都在运行时用代码生成（Three.js r128 + WebAudio）。
+纯代码编写的 3D 肉鸽（roguelike）射击游戏：单个 `index.html`，没有任何图片、模型或音频素材。几何体、材质、粒子和音效都在运行时用代码生成（Three.js r128 + WebAudio）。Three.js 已内嵌在 `index.html` 里，断网也能运行。
 
 ## 运行
 
-直接用浏览器打开 `index.html`（需要能访问 cdnjs 加载 Three.js），或在本目录起一个本地静态服务：
+直接用浏览器打开 `index.html`，或在本目录起一个本地静态服务：
 
 ```bash
 python3 -m http.server 8000 --bind 127.0.0.1
