@@ -300,7 +300,9 @@ const Sfx = (() => {
 //  渲染基础
 // ============================================================
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+// 触屏设备（手机、平板）降低分辨率和阴影精度，把余量留给贴图和后处理
+const LOW = matchMedia('(pointer: coarse)').matches;
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, LOW ? 1.5 : 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -317,7 +319,7 @@ const CAM_OFF = new THREE.Vector3(0, 15.5, 10.5);
 scene.add(new THREE.HemisphereLight(0x8d86c0, 0x1c1422, 0.62));
 const sun = new THREE.DirectionalLight(0xc8c0ff, 0.5);
 sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.mapSize.set(LOW ? 1024 : 2048, LOW ? 1024 : 2048);
 Object.assign(sun.shadow.camera, { left: -22, right: 22, top: 22, bottom: -22, near: 1, far: 60 });
 sun.shadow.bias = -0.0006;
 scene.add(sun, sun.target);
@@ -359,6 +361,112 @@ const doorMat = new THREE.MeshStandardMaterial({ color: 0x3a1022, emissive: 0xff
 const floorMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.92, metalness: 0.02 });
 const wallMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.85, metalness: 0.04 });
 const stoneMat = new THREE.MeshStandardMaterial({ color: 0x3c3650, roughness: 0.8 });
+
+// ---------- 程序化贴图：地面石板与墙体砌石，启动时在 CPU 上烘焙一次 ----------
+const TEX = LOW ? 256 : 512;
+const hash2 = (x, y, s) => {
+  let h = (Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(s, 1274126177)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+};
+// 周期为 p 格的值噪声：贴图首尾相接，平铺时没有接缝
+function vnoise(x, y, p, s) {
+  const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+  const u = fx * fx * (3 - 2 * fx), v = fy * fy * (3 - 2 * fy);
+  const xa = x0 % p, xb = (xa + 1) % p, ya = y0 % p, yb = (ya + 1) % p;
+  const a = hash2(xa, ya, s), b = hash2(xb, ya, s), c = hash2(xa, yb, s), d = hash2(xb, yb, s);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+function fbm(x, y, p, s, oct) {
+  let a = 0, w = 0.5, n = 0;
+  for (let i = 0; i < oct; i++) { a += w * vnoise(x, y, p, s + i); n += w; x *= 2; y *= 2; p *= 2; w *= 0.5; }
+  return a / n;
+}
+const sstep = (a, b, v) => { const t = clamp((v - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+
+// 地面：一张贴图覆盖 4×4 格。每格是一块石板，部分格子再分成两块或四块
+function floorSurf(u, v, o) {
+  const U = u * 4, V = v * 4, cx = Math.floor(U), cy = Math.floor(V);
+  const k = hash2(cx, cy, 11);
+  const sx = k > 0.93 || (k > 0.78 && k <= 0.86) ? 2 : 1, sy = k > 0.86 ? 2 : 1;
+  const ix = Math.min(sx - 1, Math.floor((U - cx) * sx)), iy = Math.min(sy - 1, Math.floor((V - cy) * sy));
+  const lx = (U - cx) * sx - ix, ly = (V - cy) * sy - iy;
+  const slab = hash2(cx * 2 + ix, cy * 2 + iy, 23);
+  const edge = Math.min(lx / sx, (1 - lx) / sx, ly / sy, (1 - ly) / sy) + (fbm(U * 8, V * 8, 32, 31, 2) - 0.5) * 0.035;
+  const face = sstep(0.004, 0.07, edge);
+  const big = fbm(U * 1.5, V * 1.5, 6, 41, 4), fine = fbm(U * 16, V * 16, 64, 53, 3);
+  const pit = Math.min(1, Math.max(0, fbm(U * 24, V * 24, 96, 67, 2) - 0.66) * 4);
+  const crack = fbm(U * 0.75, V * 0.75, 3, 83, 2) > 0.54 ? 1 - sstep(0.004, 0.02, Math.abs(fbm(U * 3, V * 3, 12, 71, 4) - 0.5)) : 0;
+  const stain = sstep(0.56, 0.74, fbm(U, V, 4, 97, 3));
+  o.h = face * (0.7 + slab * 0.12) + big * 0.1 + fine * 0.1 - pit * 0.22 - crack * 0.3;
+  const sh = (0.5 + face * 0.34) * (0.84 + slab * 0.24) * (0.84 + big * 0.3) * (0.9 + fine * 0.2) * (1 - pit * 0.5) * (1 - crack * 0.6) * (1 - stain * 0.26);
+  o.r = sh * (1 + (slab - 0.5) * 0.08 - stain * 0.04); o.g = sh; o.b = sh * (1 - (slab - 0.5) * 0.08 + stain * 0.06);
+  o.rough = clamp(0.96 - stain * 0.42 - face * 0.1 + pit * 0.1, 0.35, 1);
+}
+// 墙体：一张贴图覆盖 2×2 米，砌块 0.5×0.25 米错缝排列。墙顶和侧面共用
+function wallSurf(u, v, o) {
+  const U = u * 2, V = v * 2, row = Math.floor(V * 4), fy = V * 4 - row;
+  const bu = U * 2 + (row & 1) * 0.5 + (hash2(row, 3, 5) - 0.5) * 0.3, bi = Math.floor(bu), fx = bu - bi;
+  const id = hash2(((bi % 4) + 4) % 4, row, 7);
+  const edge = Math.min(fx * 0.5, (1 - fx) * 0.5, fy * 0.25, (1 - fy) * 0.25) + (fbm(U * 16, V * 16, 32, 13, 2) - 0.5) * 0.03;
+  const face = sstep(0.008, 0.045, edge);
+  const big = fbm(U * 2, V * 2, 4, 17, 4), fine = fbm(U * 24, V * 24, 48, 19, 3);
+  const pit = Math.min(1, Math.max(0, fbm(U * 32, V * 32, 64, 29, 2) - 0.66) * 4);
+  const crack = id > 0.7 ? 1 - sstep(0.005, 0.022, Math.abs(fbm(U * 4, V * 4, 8, 37, 3) - 0.5)) : 0;
+  o.h = face * (0.55 + id * 0.3) + big * 0.08 + fine * 0.12 - pit * 0.2 - crack * 0.25 * face;
+  const sh = (0.5 + face * 0.36) * (0.84 + id * 0.28) * (0.86 + big * 0.26) * (0.9 + fine * 0.2) * (1 - pit * 0.45) * (1 - crack * 0.5 * face);
+  o.r = sh * (1 + (id - 0.5) * 0.1); o.g = sh; o.b = sh * (1 - (id - 0.5) * 0.1);
+  o.rough = clamp(0.98 - face * 0.14 - id * 0.1 + pit * 0.1, 0.4, 1);
+}
+function bakeSurface(size, surf, bump) {
+  const n = size * size, H = new Float32Array(n), m = size - 1, k = bump * size / 512;
+  const col = new Uint8ClampedArray(n * 4), rgh = new Uint8ClampedArray(n * 4), nrm = new Uint8ClampedArray(n * 4);
+  const o = { h: 0, r: 0, g: 0, b: 0, rough: 1 };
+  let sum = 0;
+  for (let y = 0, i = 0; y < size; y++) for (let x = 0; x < size; x++, i++) {
+    surf((x + 0.5) / size, (y + 0.5) / size, o);
+    H[i] = o.h; sum += o.g;
+    const j = i * 4;
+    col[j] = o.r * 255; col[j + 1] = o.g * 255; col[j + 2] = o.b * 255; col[j + 3] = 255;
+    rgh[j] = 255; rgh[j + 1] = o.rough * 255; rgh[j + 3] = 255;
+  }
+  for (let y = 0, i = 0; y < size; y++) for (let x = 0; x < size; x++, i++) {
+    const dx = (H[y * size + ((x + 1) & m)] - H[y * size + ((x - 1) & m)]) * k;
+    const dy = (H[((y + 1) & m) * size + x] - H[((y - 1) & m) * size + x]) * k;
+    const l = 1 / Math.hypot(dx, dy, 1), j = i * 4;
+    nrm[j] = (0.5 - dx * l * 0.5) * 255; nrm[j + 1] = (0.5 - dy * l * 0.5) * 255; nrm[j + 2] = (0.5 + l * 0.5) * 255; nrm[j + 3] = 255;
+  }
+  const tex = d => {
+    const t = new THREE.DataTexture(new Uint8Array(d.buffer), size, size, THREE.RGBAFormat);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.magFilter = THREE.LinearFilter; t.minFilter = THREE.LinearMipmapLinearFilter; t.generateMipmaps = true;
+    t.anisotropy = Math.min(4, renderer.capabilities.getMaxAnisotropy());
+    t.needsUpdate = true;
+    return t;
+  };
+  return { map: tex(col), roughnessMap: tex(rgh), normalMap: tex(nrm), mean: sum / n };
+}
+function applySurface(mat, meters, surf, bump) {
+  const s = bakeSurface(TEX, surf, bump);
+  mat.map = s.map; mat.roughnessMap = s.roughnessMap; mat.normalMap = s.normalMap;
+  mat.roughness = 1;
+  mat.color.setScalar(1 / s.mean);   // 抵消贴图的平均明暗，整体亮度仍由每格的实例颜色决定
+  // 按世界坐标取 UV，纹理在相邻方块之间连续。缩放走 uniform，两种材质可以共用同一个着色器程序
+  mat.onBeforeCompile = sh => {
+    sh.uniforms.uvScale = { value: 1 / meters };
+    sh.vertexShader = 'uniform float uvScale;\n' + sh.vertexShader.replace('#include <uv_vertex>', `
+      vec4 wuvP = vec4( position, 1.0 );
+      #ifdef USE_INSTANCING
+        wuvP = instanceMatrix * wuvP;
+      #endif
+      wuvP = modelMatrix * wuvP;
+      vec3 wuvN = abs( normal );
+      vUv = ( wuvN.y > 0.5 ? wuvP.xz : ( wuvN.x > 0.5 ? wuvP.zy : wuvP.xy ) ) * uvScale;
+    `);
+  };
+}
+applySurface(floorMat, 4, floorSurf, 2.6);
+applySurface(wallMat, 2, wallSurf, 3.2);
 
 const levelGroup = new THREE.Group(); scene.add(levelGroup);   // 本层地形
 const dynGroup = new THREE.Group(); scene.add(dynGroup);       // 本层动态物体
@@ -2016,11 +2124,111 @@ $('muteBtn').addEventListener('click', () => setMuted(Sfx.toggle()));
 $('pauseBtn').addEventListener('click', () => (state === 'play' ? pauseGame() : resumeGame()));
 
 // ============================================================
+//  后处理：泛光、调色、暗角、颗粒
+// ============================================================
+// 场景先画进离屏缓冲（色调映射已在材质里完成），再提取高亮部分逐级缩小、放大叠加成泛光，最后合成到屏幕。
+// 只在 WebGL2 下启用；帧率持续过低时自动关闭，退回直接渲染。
+const Post = (() => {
+  if (!renderer.capabilities.isWebGL2) return null;
+  const LEVELS = LOW ? 4 : 5;
+  const BLOOM_TYPE = renderer.extensions.has('EXT_color_buffer_float') ? THREE.HalfFloatType : THREE.UnsignedByteType;
+  const tri = new THREE.BufferGeometry();
+  tri.setAttribute('position', new THREE.Float32BufferAttribute([-1, -1, 0, 3, -1, 0, -1, 3, 0], 3));
+  tri.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 2, 0, 0, 2], 2));
+  const quad = new THREE.Mesh(tri, null); quad.frustumCulled = false;
+  const fsScene = new THREE.Scene(); fsScene.add(quad);
+  const fsCam = new THREE.Camera();
+  const VERT = 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4( position.xy, 0.0, 1.0 ); }';
+  const mk = (frag, uniforms, extra) => new THREE.ShaderMaterial(Object.assign({ vertexShader: VERT, fragmentShader: frag, uniforms, depthTest: false, depthWrite: false }, extra));
+  const HEAD = 'uniform sampler2D tSrc; uniform vec2 uTexel; varying vec2 vUv;\n';
+
+  // 提取高亮：亮度阈值 0.6，带 0.15 的软过渡
+  const preMat = mk(HEAD + `void main() {
+    vec3 c = ( texture2D( tSrc, vUv + uTexel * vec2( -1.0, -1.0 ) ).rgb + texture2D( tSrc, vUv + uTexel * vec2( 1.0, -1.0 ) ).rgb
+             + texture2D( tSrc, vUv + uTexel * vec2( -1.0, 1.0 ) ).rgb + texture2D( tSrc, vUv + uTexel * vec2( 1.0, 1.0 ) ).rgb ) * 0.25;
+    float br = max( c.r, max( c.g, c.b ) );
+    float rq = clamp( br - 0.45, 0.0, 0.3 ); rq = rq * rq / 0.6;
+    gl_FragColor = vec4( c * max( rq, br - 0.6 ) / max( br, 1e-4 ), 1.0 );
+  }`, { tSrc: { value: null }, uTexel: { value: new THREE.Vector2() } });
+  const downMat = mk(HEAD + `void main() {
+    vec3 c = texture2D( tSrc, vUv ).rgb * 4.0
+           + texture2D( tSrc, vUv + uTexel * vec2( -1.0, -1.0 ) ).rgb + texture2D( tSrc, vUv + uTexel * vec2( 1.0, -1.0 ) ).rgb
+           + texture2D( tSrc, vUv + uTexel * vec2( -1.0, 1.0 ) ).rgb + texture2D( tSrc, vUv + uTexel * vec2( 1.0, 1.0 ) ).rgb;
+    gl_FragColor = vec4( c * 0.125, 1.0 );
+  }`, { tSrc: { value: null }, uTexel: { value: new THREE.Vector2() } });
+  const upMat = mk(HEAD + `void main() {
+    vec2 d = uTexel;
+    vec3 c = texture2D( tSrc, vUv ).rgb * 4.0
+           + ( texture2D( tSrc, vUv + vec2( d.x, 0.0 ) ).rgb + texture2D( tSrc, vUv - vec2( d.x, 0.0 ) ).rgb
+             + texture2D( tSrc, vUv + vec2( 0.0, d.y ) ).rgb + texture2D( tSrc, vUv - vec2( 0.0, d.y ) ).rgb ) * 2.0
+           + texture2D( tSrc, vUv + d ).rgb + texture2D( tSrc, vUv - d ).rgb
+           + texture2D( tSrc, vUv + vec2( d.x, -d.y ) ).rgb + texture2D( tSrc, vUv + vec2( -d.x, d.y ) ).rgb;
+    gl_FragColor = vec4( c * 0.0625, 1.0 );
+  }`, { tSrc: { value: null }, uTexel: { value: new THREE.Vector2() } }, { blending: THREE.AdditiveBlending, transparent: true });
+  const outMat = mk(`uniform sampler2D tSrc; uniform sampler2D tBloom; uniform float uBloom; uniform float uTime; uniform float uAspect; varying vec2 vUv;
+  float hash( vec2 p ) { vec3 q = fract( vec3( p.xyx ) * 0.1031 ); q += dot( q, q.yzx + 33.33 ); return fract( ( q.x + q.y ) * q.z ); }
+  void main() {
+    vec3 c = texture2D( tSrc, vUv ).rgb + texture2D( tBloom, vUv ).rgb * uBloom;
+    c = clamp( c, 0.0, 1.0 );
+    float l = dot( c, vec3( 0.2126, 0.7152, 0.0722 ) );
+    c = mix( vec3( l ), c, 1.1 );                                   // 饱和度
+    c = mix( c, c * c * ( 3.0 - 2.0 * c ), 0.22 );                  // 对比度
+    c *= mix( vec3( 0.93, 0.96, 1.08 ), vec3( 1.06, 1.0, 0.93 ), smoothstep( 0.03, 0.6, l ) );   // 暗部偏冷、亮部偏暖
+    vec2 q = ( vUv - 0.5 ) * vec2( mix( 1.0, uAspect, 0.35 ), 1.0 );
+    c *= mix( 0.42, 1.0, smoothstep( 0.95, 0.3, length( q ) ) );    // 暗角
+    c += ( hash( gl_FragCoord.xy + fract( uTime ) * 311.0 ) - 0.5 ) * 0.045 * ( 1.0 - l * 0.7 );   // 颗粒，同时打散暗部色带
+    gl_FragColor = vec4( c, 1.0 );
+  }`, { tSrc: { value: null }, tBloom: { value: null }, uBloom: { value: 0.42 }, uTime: { value: 0 }, uAspect: { value: 1 } });
+
+  let sceneRT = null, mips = [];
+  const free = () => { if (sceneRT) sceneRT.dispose(); for (const m of mips) m.dispose(); sceneRT = null; mips = []; };
+  const size = new THREE.Vector2();
+  const api = {
+    on: true,
+    resize() {
+      free();
+      if (!api.on) return;
+      renderer.getDrawingBufferSize(size);
+      const w = Math.max(2, size.x), h = Math.max(2, size.y);
+      sceneRT = new THREE.WebGLMultisampleRenderTarget(w, h, { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat });
+      sceneRT.samples = LOW ? 2 : 4;
+      for (let i = 0; i < LEVELS; i++) {
+        mips.push(new THREE.WebGLRenderTarget(Math.max(2, w >> (i + 1)), Math.max(2, h >> (i + 1)), { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat, type: BLOOM_TYPE, depthBuffer: false }));
+      }
+      outMat.uniforms.uAspect.value = w / h;
+    },
+    disable() { api.on = false; free(); renderer.setRenderTarget(null); },
+    render(t) {
+      const pass = (mat, src, dst) => {
+        mat.uniforms.tSrc.value = src.texture;
+        if (mat.uniforms.uTexel) mat.uniforms.uTexel.value.set(1 / src.width, 1 / src.height);
+        quad.material = mat;
+        renderer.setRenderTarget(dst);
+        renderer.render(fsScene, fsCam);
+      };
+      renderer.setRenderTarget(sceneRT);
+      renderer.render(scene, camera);
+      pass(preMat, sceneRT, mips[0]);
+      for (let i = 1; i < LEVELS; i++) pass(downMat, mips[i - 1], mips[i]);
+      renderer.autoClear = false;
+      for (let i = LEVELS - 1; i > 0; i--) pass(upMat, mips[i], mips[i - 1]);
+      renderer.autoClear = true;
+      outMat.uniforms.tBloom.value = mips[0].texture;
+      outMat.uniforms.uTime.value = REDUCED ? 0 : t;
+      pass(outMat, sceneRT, null);
+    },
+  };
+  return api;
+})();
+let slowFor = 0, warm = 0;
+
+// ============================================================
 //  主循环
 // ============================================================
 function resize() {
   const w = innerWidth, h = innerHeight;
   renderer.setSize(w, h, false);
+  if (Post) Post.resize();
   camera.aspect = w / h;
   camera.fov = w / h < 0.8 ? 64 : 48;
   camera.updateProjectionMatrix();
@@ -2062,7 +2270,14 @@ function tick(dt) {
 
 function frame(now) {
   requestAnimationFrame(frame);
-  const dt = Math.min(0.05, (now - last) / 1000);
+  const raw = now - last;
+  const dt = Math.min(0.05, raw / 1000);
+  // 启动 3 秒后，若连续 3 秒低于约 35 帧就关闭后处理（切到后台再回来的长间隔不计入）
+  if (Post && Post.on && raw < 250) {
+    warm += raw;
+    slowFor = warm > 3000 && raw > 28 ? slowFor + raw : 0;
+    if (slowFor > 3000) Post.disable();
+  }
   last = now;
   tick(dt);
 
@@ -2089,7 +2304,7 @@ function frame(now) {
   playerLight.position.set(px, 2.2, pz);
   playerLight.intensity = 1.55 + Math.sin(time * 9) * 0.12;
 
-  renderer.render(scene, camera);
+  if (Post && Post.on) Post.render(time); else renderer.render(scene, camera);
 }
 
 buildLevel();
@@ -2097,7 +2312,7 @@ showBest();
 requestAnimationFrame(frame);
 
 // 供自动化测试读取状态（不影响游戏）
-window.__ember = { get state() { return state; }, get floor() { return floorNum; }, get enemies() { return enemies.length; }, get hp() { return P.hp; }, get level() { return P.level; }, get kills() { return run.kills; }, rooms: () => rooms.length, _dbg: () => ({ P, rooms, enemies, bossEnemy, portal, stats, hazards, ebullets, DF, setFloor(n) { floorNum = n; DF = calcDiff(n); }, spawn: (t, x, z, el) => createEnemy(t, x, z, el), solid: solidAt, reset() { for (const e of enemies) killEnemy(e, true); enemies = []; bossEnemy = null; for (const b of ebullets) dynGroup.remove(b.mesh); ebullets = []; while (hazards.length) removeHazard(hazards.length - 1); } }), _step(n) { for (let i = 0; i < n; i++) tick(1 / 60); } };
+window.__ember = { get state() { return state; }, get floor() { return floorNum; }, get enemies() { return enemies.length; }, get hp() { return P.hp; }, get level() { return P.level; }, get kills() { return run.kills; }, rooms: () => rooms.length, _dbg: () => ({ P, rooms, enemies, bossEnemy, portal, stats, hazards, ebullets, DF, setFloor(n) { floorNum = n; DF = calcDiff(n); }, spawn: (t, x, z, el) => createEnemy(t, x, z, el), solid: solidAt, reset() { for (const e of enemies) killEnemy(e, true); enemies = []; bossEnemy = null; for (const b of ebullets) dynGroup.remove(b.mesh); ebullets = []; while (hazards.length) removeHazard(hazards.length - 1); } }), _step(n) { for (let i = 0; i < n; i++) tick(1 / 60); }, get post() { return !!(Post && Post.on); }, _postOff() { if (Post) Post.disable(); }, _bench(n, usePost) { const gl = renderer.getContext(), px = new Uint8Array(4), t0 = performance.now(); for (let i = 0; i < n; i++) { if (usePost && Post && Post.on) Post.render(time); else renderer.render(scene, camera); } gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px); return (performance.now() - t0) / n; } };
 })();
 </script>
 </body>
