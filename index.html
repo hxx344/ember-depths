@@ -25,7 +25,8 @@
 }
 [hidden] { display: none !important; }
 /* 脚本没有运行时（例如微信的文件预览）才会显示：延迟出现，正常加载时脚本会先把它隐藏 */
-.norun { margin: 14px 0 0; font-size: 14px; line-height: 1.6; color: var(--ember-hot); opacity: 0; animation: norun 0.3s 2.5s forwards; }
+.norun { margin: 14px 0 0; font-size: 14px; line-height: 1.6; color: var(--ember-hot); opacity: 0; animation: norun 0.3s 2.5s forwards; user-select: text; -webkit-user-select: text; }
+.norun a { color: inherit; font-weight: 700; word-break: break-all; }
 @keyframes norun { to { opacity: 1; } }
 html, body { height: 100%; margin: 0; overflow: hidden; }
 body {
@@ -173,7 +174,7 @@ body {
       </dl>
       <div id="bestLine" class="best"></div>
       <button id="startBtn" class="btn" type="button">点燃火种</button>
-      <p id="noRun" class="norun">点击没有反应？当前页面不能运行游戏。请点右上角的「···」，选择「在浏览器打开」（或「用其他应用打开」，再选浏览器）。</p>
+      <p id="noRun" class="norun">点击没有反应？这里是文件预览，不能运行游戏。请在浏览器中打开网址：<a href="https://hxx344.github.io/ember-depths/">hxx344.github.io/ember-depths</a></p>
     </div>
   </div>
 </section>
